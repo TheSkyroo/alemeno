@@ -1,15 +1,11 @@
-<h1 align="center">🔲 Marker Scanner</h1>
+# 🔲 Marker Scanner
 
-<p align="center">
-  A React Native Android app that detects a custom asymmetric square marker in real-time using a pure TypeScript computer vision pipeline — no OpenCV required.
-</p>
+> A React Native Android app that detects a custom asymmetric square marker in real-time using a pure TypeScript computer vision pipeline — no OpenCV required.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/React_Native-0.73.9-61DAFB?style=for-the-badge&logo=react&logoColor=white" alt="React Native" />
-  <img src="https://img.shields.io/badge/TypeScript-5.4-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android" />
-  <img src="https://img.shields.io/badge/Vision_Camera-v4-FF6B6B?style=for-the-badge" alt="Vision Camera" />
-</p>
+![React Native](https://img.shields.io/badge/React_Native-0.73.9-61DAFB?style=for-the-badge&logo=react&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.4-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
+![Vision Camera](https://img.shields.io/badge/Vision_Camera-v4-FF6B6B?style=for-the-badge)
 
 ---
 
@@ -17,10 +13,10 @@
 
 - 📷 **Live camera feed** powered by `react-native-vision-camera`
 - 🔲 **Center-square frame processing** with a JavaScript worklet pipeline
-- 🧠 **9-stage detection algorithm** (grayscale → blur → Otsu threshold → BFS components → quad fitting → homography warp → orientation fix → verification → dedup)
-- 🔄 **Orientation correction** across all 4 right-angle rotations via asymmetric corner scoring
+- 🧠 **9-stage detection algorithm** — grayscale → blur → Otsu → BFS → quad fit → homography → orientation → verify → dedup
+- 🔄 **Orientation correction** across all 4 rotations via asymmetric corner scoring
 - 💾 **Collects 20 distinct** 300×300 PNG captures with perceptual-hash deduplication
-- 🔧 **Zero native dependencies** — all image processing runs in Reanimated worklets
+- 🔧 **Zero native CV dependencies** — all image processing runs in Reanimated worklets
 
 ---
 
@@ -30,22 +26,22 @@
 marker-scanner/
 ├── src/
 │   ├── screens/
-│   │   ├── CameraScreen.tsx       # Live viewfinder + frame processor
-│   │   └── ResultsScreen.tsx      # 20-capture gallery
+│   │   ├── CameraScreen.tsx         # Live viewfinder + frame processor
+│   │   └── ResultsScreen.tsx        # 20-capture gallery
 │   ├── components/
-│   │   ├── MarkerOverlay.tsx      # Viewfinder guide square
-│   │   ├── MarkerGrid.tsx         # Capture thumbnail grid
-│   │   └── CaptureProgress.tsx    # Progress bar (x/20)
+│   │   ├── MarkerOverlay.tsx         # Viewfinder guide square
+│   │   ├── MarkerGrid.tsx            # Capture thumbnail grid
+│   │   └── CaptureProgress.tsx      # Progress bar (x / 20)
 │   └── utils/
-│       ├── markerDetection.ts     # Full 9-stage pipeline
-│       ├── perspectiveTransform.ts # Homography warp
+│       ├── markerDetection.ts        # Full 9-stage pipeline
+│       ├── perspectiveTransform.ts   # Homography warp
 │       ├── orientationCorrection.ts
-│       └── imageUtils.ts          # PNG encoder, base64, pHash
+│       └── imageUtils.ts             # PNG encoder, base64, pHash
 ├── assets/marker/
-│   ├── marker.png                 # Printable marker (300×300)
+│   ├── marker.png                    # Printable marker (300×300)
 │   └── marker_print.png
-├── Marker Images/                 # Test images (correct & incorrect)
-├── APPROACH.md                    # Full technical deep-dive
+├── Marker Images/                    # Test images (correct & incorrect)
+├── APPROACH.md                       # Full technical write-up
 └── App.tsx
 ```
 
@@ -53,37 +49,37 @@ marker-scanner/
 
 ## 🧠 Detection Algorithm
 
-The pipeline runs inside a `useFrameProcessor` worklet at ~4 fps:
+The pipeline runs inside a `useFrameProcessor` worklet at ~4 fps on a 600×600 center crop:
 
 | Stage | Description |
-|------:|:------------|
-| **1** | Crop the largest centered square from each frame, resize to **600×600 RGB** |
-| **2** | Convert to grayscale using ITU-R BT.601 luminance weights |
-| **3** | Apply a separable **5×5 Gaussian blur** to suppress noise |
+| -----:|:----------- |
+| **1** | Crop largest centered square, resize to **600×600 RGB** |
+| **2** | Convert to grayscale — ITU-R BT.601 luminance weights |
+| **3** | Separable **5×5 Gaussian blur** to suppress noise |
 | **4** | **Otsu adaptive threshold** — no hard-coded constants |
-| **5** | **BFS connected-component analysis** with area, aspect ratio, and fill filters |
-| **6** | Fit a **quadrilateral** using extreme boundary points |
-| **7** | Compute a **3×3 homography** and warp to a 300×300 patch |
-| **8** | **Orientation correction** — score all 4 rotations, pick best |
-| **9** | **Marker verification** (5 region checks) + perceptual-hash dedup |
+| **5** | **BFS connected-component** analysis with pre-filters |
+| **6** | Fit a **quadrilateral** from extreme boundary points |
+| **7** | Compute a **3×3 homography**, warp to 300×300 patch |
+| **8** | **Orientation correction** — score all 4 rotations |
+| **9** | **Marker verification** (5 region checks) + pHash dedup |
 
 <details>
-<summary><b>📐 Candidate Pre-filters (Stage 5)</b></summary>
+<summary><b>Candidate Pre-filters (Stage 5)</b></summary>
 
 | Filter | Range | Reason |
-|:-------|:-----:|:-------|
+|:------ |:-----:|:------ |
 | Pixel area | 5 000 – 500 000 | Rejects tiny noise and full-frame blobs |
 | Bounding-box aspect ratio | 0.8 – 1.2 | Border must be nearly square |
-| Fill ratio (area / bbox) | 0.08 – 0.45 | Hollow frame sits here; solids and lines are rejected |
+| Fill ratio (area / bbox) | 0.08 – 0.45 | Hollow frame sits here; solid blocks are rejected |
 | Boundary point count | ≥ 40 | Degenerate micro-blobs discarded |
 
 </details>
 
 <details>
-<summary><b>✅ Marker Verification Thresholds (Stage 9)</b></summary>
+<summary><b>Marker Verification Thresholds (Stage 9)</b></summary>
 
 | Region Check | Threshold | Rejects |
-|:-------------|:---------:|:--------|
+|:------------ |:---------:|:------- |
 | Outer 20 px border — black ratio | ≥ 0.80 | Rectangles without a full border |
 | Top-left 60×60 — black ratio | ≥ 0.75 | Markers missing the corner square |
 | Top-right 60×60 — white ratio | ≥ 0.70 | Wrong corner placement |
@@ -97,28 +93,24 @@ The pipeline runs inside a `useFrameProcessor` worklet at ~4 fps:
 
 ## 🔲 Marker Design
 
-The target marker is an **asymmetric square** that makes every 90° rotation visually unique:
+The target marker is an **asymmetric square** — each 90° rotation is visually unique due to the single filled corner:
 
 | Property | Value |
-|:---------|:------|
+|:-------- |:----- |
 | Canvas size | 300 × 300 px |
 | Outer border thickness | 20 px |
 | Filled corner square | 60 × 60 px (top-left only) |
 | Color palette | Black & white only |
 | Interior open area | > 60% (designed for future payload encoding) |
 
-Printable assets are in `assets/marker/`:
-- `marker.png` — digital reference
-- `marker_print.png` — print-ready version
+Printable assets: `assets/marker/marker.png` and `assets/marker/marker_print.png`
 
 ---
 
 ## ⚡ Performance
 
-All processing runs in Reanimated worklets at **~4 fps** on a 600×600 crop:
-
 | Stage | ~Cost |
-|:------|------:|
+|:----- | -----:|
 | Resize + crop (native plugin) | 4 ms |
 | Grayscale + blur + threshold | 8 ms |
 | Connected components (BFS) | 12 ms |
@@ -134,7 +126,7 @@ All processing runs in Reanimated worklets at **~4 fps** on a 600×600 crop:
 ## 🛠️ Prerequisites
 
 | Tool | Version |
-|:-----|:--------|
+|:---- |:------- |
 | Node.js | 18 LTS or later |
 | Java JDK | 17 |
 | Android Studio | Hedgehog or later |
@@ -152,17 +144,16 @@ Ensure `ANDROID_HOME` and `JAVA_HOME` are set in your environment.
 git clone https://github.com/TheSkyroo/alemeno.git
 cd alemeno
 
-# 2. Install JS dependencies
+# 2. Install dependencies
 npm install
 
 # 3. Start Metro bundler
 npm start
 ```
 
-Connect a physical Android device with USB debugging enabled, then in a new terminal:
+Connect a physical Android device with USB debugging enabled, then in a separate terminal:
 
 ```bash
-# Run on device
 npm run android
 ```
 
@@ -179,31 +170,14 @@ cd android
 
 Output: `android/app/build/outputs/apk/release/app-release.apk`
 
-> Use **JDK 17** with React Native 0.73.x for highest build compatibility.
-
----
-
-## ⚠️ Known Limitations
-
-- The contour stage is implemented in TypeScript worklets rather than OpenCV, so the quadrilateral estimate is based on connected-component boundaries and extreme-corner fitting.
-- Otsu thresholding is robust for the included marker, but extremely uneven lighting can reduce confidence compared with a native adaptive-threshold pipeline.
-- Release builds have not been executed in this workspace because dependencies and the Android SDK are not installed locally here.
-
----
-
-## 🗺️ Potential Improvements
-
-- [ ] Native OpenCV frame processor for adaptive thresholding and better motion-blur resilience
-- [ ] Bit-encoding inside the white interior using a cell grid (the 60% empty-area constraint was designed for this)
-- [ ] Exposure and focus guidance overlays to assist users in poor lighting
-- [ ] Motion-quality gate (reject blurry frames) to improve capture consistency
+> Use **JDK 17** with React Native 0.73.x for the highest build compatibility.
 
 ---
 
 ## 📚 Tech Stack
 
 | Package | Purpose |
-|:--------|:--------|
+|:------- |:------- |
 | `react-native-vision-camera` | Raw camera frame access |
 | `vision-camera-resize-plugin` | Native crop + resize in worklet |
 | `react-native-reanimated` | Worklet runtime for off-thread processing |
@@ -212,6 +186,23 @@ Output: `android/app/build/outputs/apk/release/app-release.apk`
 
 ---
 
+## ⚠️ Known Limitations
+
+- Contour stage is TypeScript-only (no OpenCV), so quad estimates rely on extreme-corner fitting from connected-component boundaries.
+- Otsu thresholding performs well under normal lighting but may degrade under extremely uneven illumination.
+- Release builds have not been run in this workspace — local Android SDK and NDK installation is required.
+
+---
+
+## 🗺️ Potential Improvements
+
+- [ ] Native OpenCV frame processor for adaptive thresholding and motion-blur resilience
+- [ ] Bit-encoding inside the white interior using a cell grid
+- [ ] Exposure/focus guidance overlays for poor lighting
+- [ ] Motion-quality gate to reject blurry frames before processing
+
+---
+
 ## 📄 License
 
-This project was built as part of the **Alemeno Frontend Internship Assignment**. See `APPROACH.md` for the full technical write-up.
+Built as part of the **Alemeno Frontend Internship Assignment**. See [`APPROACH.md`](./APPROACH.md) for the full technical write-up.
