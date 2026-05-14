@@ -1,0 +1,14 @@
+node_modules/
+android/.gradle/
+android/app/build/
+android/build/
+*.keystore
+*.jks
+*.p12
+*.orig
+.idea/
+.vscode/
+.DS_Store
+npm-debug.log*
+yarn-error.log*
+coverage/
