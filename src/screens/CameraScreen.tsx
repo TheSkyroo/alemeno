@@ -1,3 +1,22 @@
+/**
+ * CameraScreen.tsx
+ *
+ * The primary screen of the Marker Scanner app.
+ *
+ * Responsibilities:
+ *  - Requests and tracks camera permissions.
+ *  - Selects the best available camera format (prefers 2000–3000 px short side).
+ *  - Runs a VisionCamera frame processor (on the JS worklet thread) that:
+ *      1. Centre-crops the frame to a square.
+ *      2. Downscales it to PROCESSING_FRAME_SIZE × PROCESSING_FRAME_SIZE.
+ *      3. Calls detectMarkerInSquareFrame() to find asymmetric markers.
+ *      4. Rate-limits submissions to at most one per 180 ms.
+ *  - Deduplicates captures by comparing perceptual hashes, centroids,
+ *    and relative areas before saving.
+ *  - Renders a live MarkerOverlay SVG on top of the camera preview.
+ *  - Shows a torch toggle and a reset button.
+ */
+
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
@@ -26,16 +45,36 @@ import {PROCESSING_FRAME_SIZE, detectMarkerInSquareFrame} from '../utils/markerD
 import {hammingDistance} from '../utils/imageUtils';
 
 type CameraScreenProps = {
+  /** Captured frames accumulated so far in this session. */
   captures: MarkerCapture[];
+  /** Increments on each reset, triggering a full component re-mount. */
   sessionKey: number;
+  /** Called when a new, non-duplicate frame is accepted. */
   onCapture: (capture: MarkerCapture) => void;
+  /** Called when the user resets the session. */
   onReset: () => void;
 };
 
+/** Number of frames required to complete a session. */
 const TARGET_COUNT = 20;
+
+/** Hide the detection overlay after this many milliseconds without a result. */
 const OVERLAY_STALE_MS = 480;
+
+/** Minimum gap (ms) between consecutive saves to avoid burst duplicates. */
 const CAPTURE_COOLDOWN_MS = 220;
 
+// ── Format selection ─────────────────────────────────────────────────────────
+
+/**
+ * Picks the "best" format from the device's available formats.
+ *
+ * Preference order:
+ *  1. Formats whose short side is between 2 000 – 3 000 px (good balance of
+ *     detail vs. processing cost), sorted by distance to 2 500 px, then by
+ *     highest FPS.
+ *  2. If none qualify, fall back to all formats sorted the same way.
+ */
 function pickCameraFormat(device: CameraDevice | undefined): CameraDeviceFormat | undefined {
   if (device == null) {
     return undefined;
@@ -49,6 +88,7 @@ function pickCameraFormat(device: CameraDevice | undefined): CameraDeviceFormat 
   });
 
   const candidates = preferred.length > 0 ? preferred : device.formats;
+
   const sorted = [...candidates].sort((left, right) => {
     const leftWidth = left.videoWidth ?? left.photoWidth ?? 0;
     const leftHeight = left.videoHeight ?? left.photoHeight ?? 0;
@@ -60,18 +100,29 @@ function pickCameraFormat(device: CameraDevice | undefined): CameraDeviceFormat 
     const rightDistance = Math.abs(rightShortSide - 2500);
 
     if (leftDistance !== rightDistance) {
-      return leftDistance - rightDistance;
+      return leftDistance - rightDistance; // Prefer closer to 2500
     }
 
-    return right.maxFps - left.maxFps;
+    return right.maxFps - left.maxFps; // Prefer higher FPS as a tiebreaker
   });
 
   return sorted[0];
 }
 
+// ── Duplicate detection ──────────────────────────────────────────────────────
+
+/**
+ * Returns true if `candidate` is too similar to any already-saved capture.
+ *
+ * A capture is considered a duplicate when ALL three conditions hold:
+ *  - Hamming distance between perceptual hashes < 12 bits
+ *  - Euclidean distance between centroids < 30 px (processing frame space)
+ *  - Relative area difference < 8 %
+ */
 function isDuplicateAnalysis(candidate: FrameAnalysis, captures: MarkerCapture[]): boolean {
   for (let index = 0; index < captures.length; index += 1) {
     const existing = captures[index];
+
     const hashDelta = hammingDistance(existing.hash, candidate.hash);
     const centerDelta = Math.sqrt(
       Math.pow(existing.geometry.centerX - candidate.geometry.centerX, 2) +
@@ -89,6 +140,8 @@ function isDuplicateAnalysis(candidate: FrameAnalysis, captures: MarkerCapture[]
   return false;
 }
 
+// ── Component ────────────────────────────────────────────────────────────────
+
 export default function CameraScreen({
   captures,
   sessionKey,
@@ -100,18 +153,25 @@ export default function CameraScreen({
   const {resize} = useResizePlugin();
   const {width} = useWindowDimensions();
 
+  // ── State ────────────────────────────────────────────────────────────
   const [permissionStatus, setPermissionStatus] =
     useState<CameraPermissionStatus>('not-determined');
   const [torchEnabled, setTorchEnabled] = useState(false);
+
+  // Latest frame analysis result — drives the overlay and status text
   const [analysis, setAnalysis] = useState<FrameAnalysis | null>(null);
 
-  const lastSeenAt = useRef(0);
-  const lastCapturedAt = useRef(0);
-  const lastSubmissionAt = useSharedValue(0);
+  // ── Timing refs / shared values ──────────────────────────────────────
+  const lastSeenAt = useRef(0);          // JS-thread: last time a result arrived
+  const lastCapturedAt = useRef(0);      // JS-thread: last time a frame was saved
+  const lastSubmissionAt = useSharedValue(0); // Worklet-thread: rate-limit guard
 
+  // ── Layout ───────────────────────────────────────────────────────────
+  // Square camera preview; capped at 440 px with a 12 px margin on each side
   const frameSize = Math.min(width - 24, 440);
-  const guideSize = frameSize / 1.5;
+  const guideSize = frameSize / 1.5; // Guide box = 2/3 of the frame
 
+  // ── Permission bootstrap ─────────────────────────────────────────────
   useEffect(() => {
     let mounted = true;
 
@@ -132,10 +192,12 @@ export default function CameraScreen({
     bootstrap();
 
     return () => {
-      mounted = false;
+      mounted = false; // Prevent state updates after unmount
     };
   }, []);
 
+  // ── Session reset cleanup ────────────────────────────────────────────
+  // Reset all transient state whenever a new session starts
   useEffect(() => {
     setAnalysis(null);
     setTorchEnabled(false);
@@ -144,6 +206,8 @@ export default function CameraScreen({
     lastSubmissionAt.value = 0;
   }, [sessionKey, lastSubmissionAt]);
 
+  // ── Overlay staleness watcher ────────────────────────────────────────
+  // Clears the overlay when no marker has been seen for OVERLAY_STALE_MS
   useEffect(() => {
     const interval = setInterval(() => {
       if (Date.now() - lastSeenAt.current > OVERLAY_STALE_MS) {
@@ -156,33 +220,44 @@ export default function CameraScreen({
     };
   }, []);
 
+  // ── Permission request ───────────────────────────────────────────────
   const requestPermission = useCallback(async () => {
     const status = await Camera.requestCameraPermission();
     setPermissionStatus(status);
   }, []);
 
+  // ── Frame analysis handler (JS thread) ──────────────────────────────
+  /**
+   * Called from the worklet thread via `emitAnalysis` each time a
+   * sufficiently distinct marker analysis is ready.
+   */
   const handleAnalysis = useCallback(
     (nextAnalysis: FrameAnalysis) => {
       lastSeenAt.current = Date.now();
-      setAnalysis(nextAnalysis);
+      setAnalysis(nextAnalysis); // Update overlay immediately
 
+      // Bail out if the session is already complete
       if (captures.length >= TARGET_COUNT) {
         return;
       }
 
       const now = Date.now();
+
+      // Enforce cooldown between consecutive saves
       if (now - lastCapturedAt.current < CAPTURE_COOLDOWN_MS) {
         return;
       }
 
+      // Skip near-duplicate frames
       if (isDuplicateAnalysis(nextAnalysis, captures)) {
         return;
       }
 
       lastCapturedAt.current = now;
+
       onCapture({
         id: `capture-${sessionKey}-${captures.length + 1}-${now}`,
-        label: '',
+        label: '',           // Label is assigned later in navigation.tsx
         base64: nextAnalysis.base64,
         hash: nextAnalysis.hash,
         confidence: nextAnalysis.confidence,
@@ -194,6 +269,7 @@ export default function CameraScreen({
     [captures, onCapture, sessionKey],
   );
 
+  // Bridge from the worklet thread back to the JS thread
   const emitAnalysis = useMemo(
     () =>
       Worklets.createRunOnJS((nextAnalysis: FrameAnalysis) => {
@@ -202,12 +278,24 @@ export default function CameraScreen({
     [handleAnalysis],
   );
 
+  // ── Frame processor (worklet thread) ────────────────────────────────
+  /**
+   * Runs on every camera frame on a background worklet thread.
+   *  1. Centre-crops the frame to a square.
+   *  2. Downscales to PROCESSING_FRAME_SIZE using the resize plugin.
+   *  3. Runs marker detection.
+   *  4. Rate-limits result emissions to ≤ 1 per 180 ms.
+   */
   const frameProcessor = useFrameProcessor(
     frame => {
       'worklet';
+
+      // Compute a square centre-crop region
       const shortSide = Math.min(frame.width, frame.height);
       const cropX = Math.floor((frame.width - shortSide) / 2);
       const cropY = Math.floor((frame.height - shortSide) / 2);
+
+      // Downscale the crop to the processing resolution
       const resized = resize(frame, {
         crop: {
           x: cropX,
@@ -222,6 +310,8 @@ export default function CameraScreen({
         pixelFormat: 'rgb',
         dataType: 'uint8',
       });
+
+      // Run the marker detection pipeline
       const result = detectMarkerInSquareFrame(
         resized,
         PROCESSING_FRAME_SIZE,
@@ -229,31 +319,38 @@ export default function CameraScreen({
       );
 
       if (result == null) {
-        return;
+        return; // No marker found in this frame
       }
 
+      // Rate-limit: skip if the last emission was less than 180 ms ago
       const timestampMs = Number(frame.timestamp) / 1000000;
       if (timestampMs - lastSubmissionAt.value < 180) {
         return;
       }
 
       lastSubmissionAt.value = timestampMs;
-      emitAnalysis(result);
+      emitAnalysis(result); // Hand off to the JS thread
     },
     [emitAnalysis, lastSubmissionAt, resize],
   );
 
+  // ── Derived display values ───────────────────────────────────────────
+  // Only render the Camera component when everything is ready and we still need frames
   const readyToRenderCamera =
     permissionStatus === 'granted' && device != null && format != null && captures.length < 20;
 
+  // Status copy shown below the camera frame
   const statusCopy =
     analysis == null
       ? 'Center the asymmetric marker inside the guide box.'
       : `Marker locked - ${Math.round(analysis.confidence * 100)}% match`;
 
+  // ── Render ───────────────────────────────────────────────────────────
   return (
     <SafeAreaView edges={['top', 'bottom']} style={styles.safeArea}>
       <View style={styles.screen}>
+
+        {/* ── Top bar: title + torch toggle ──────────────────────────── */}
         <View style={styles.topBar}>
           <View>
             <Text style={styles.eyebrow}>Live detection</Text>
@@ -263,17 +360,23 @@ export default function CameraScreen({
           <Pressable
             onPress={() => setTorchEnabled(current => !current)}
             style={[styles.secondaryButton, torchEnabled && styles.secondaryButtonActive]}>
-            <Text style={[styles.secondaryButtonLabel, torchEnabled && styles.secondaryButtonLabelActive]}>
+            <Text
+              style={[
+                styles.secondaryButtonLabel,
+                torchEnabled && styles.secondaryButtonLabelActive,
+              ]}>
               {torchEnabled ? 'Torch On' : 'Torch Off'}
             </Text>
           </Pressable>
         </View>
 
+        {/* ── Camera preview shell ───────────────────────────────────── */}
         <View style={[styles.cameraShell, {width: frameSize, height: frameSize}]}>
           {readyToRenderCamera ? (
+            /* Live camera with frame processor */
             <Camera
               device={device}
-              fps={Math.min(format?.maxFps ?? 30, 30)}
+              fps={Math.min(format?.maxFps ?? 30, 30)} // Cap at 30 fps for battery
               format={format}
               frameProcessor={frameProcessor}
               isActive
@@ -285,6 +388,7 @@ export default function CameraScreen({
               video={false}
             />
           ) : (
+            /* Placeholder when camera is not yet ready */
             <View style={styles.placeholder}>
               {permissionStatus !== 'granted' ? (
                 <>
@@ -298,13 +402,17 @@ export default function CameraScreen({
                 </>
               ) : device == null || format == null ? (
                 <>
+                  {/* Device or format still loading */}
                   <ActivityIndicator color="#37e58d" size="large" />
-                  <Text style={styles.placeholderBody}>Preparing the highest-resolution camera format.</Text>
+                  <Text style={styles.placeholderBody}>
+                    Preparing the highest-resolution camera format.
+                  </Text>
                 </>
               ) : null}
             </View>
           )}
 
+          {/* SVG overlay: guide box + detected-quad polygon */}
           <MarkerOverlay
             active={analysis != null}
             detectedQuad={analysis?.quad ?? null}
@@ -314,31 +422,38 @@ export default function CameraScreen({
           />
         </View>
 
+        {/* ── Status text ────────────────────────────────────────────── */}
         <Text style={styles.statusCopy}>{statusCopy}</Text>
 
+        {/* ── Bottom panel: capture progress + actions ───────────────── */}
         <View style={styles.bottomPanel}>
           <CaptureProgress count={captures.length} target={TARGET_COUNT} />
 
           <View style={styles.bottomActions}>
+            {/* Reset button — clears all captures and returns to idle */}
             <Pressable onPress={onReset} style={styles.secondaryAction}>
               <Text style={styles.secondaryActionLabel}>Reset</Text>
             </Pressable>
 
+            {/* Resolution badge — shows the active camera format dimensions */}
             <View style={styles.resolutionTag}>
-                <Text style={styles.resolutionTagLabel}>
-                  {format == null
-                    ? 'Awaiting camera'
+              <Text style={styles.resolutionTagLabel}>
+                {format == null
+                  ? 'Awaiting camera'
                   : `${format.videoWidth ?? format.photoWidth ?? 0}x${
                       format.videoHeight ?? format.photoHeight ?? 0
                     }`}
-                </Text>
+              </Text>
             </View>
           </View>
         </View>
+
       </View>
     </SafeAreaView>
   );
 }
+
+// ── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   safeArea: {
@@ -447,7 +562,7 @@ const styles = StyleSheet.create({
   },
   secondaryButtonActive: {
     backgroundColor: '#18372a',
-    borderColor: '#37e58d',
+    borderColor: '#37e58d', // Green border when torch is on
   },
   secondaryButtonLabel: {
     color: '#cde0dd',

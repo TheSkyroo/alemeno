@@ -1,8 +1,20 @@
+/**
+ * MarkerGrid.tsx
+ *
+ * Displays a vertical list of captured marker thumbnails.
+ * Each card shows the normalised 300×300 px PNG of the marker
+ * alongside its human-readable frame label (e.g. "Frame #3").
+ *
+ * Scroll is intentionally disabled — the parent ScrollView in
+ * ResultsScreen handles scrolling for the whole page.
+ */
+
 import React from 'react';
 import {FlatList, Image, StyleSheet, Text, View} from 'react-native';
 import type {MarkerCapture} from '../types';
 
 type MarkerGridProps = {
+  /** The list of captures to display, in capture order. */
   captures: MarkerCapture[];
 };
 
@@ -12,9 +24,10 @@ export default function MarkerGrid({captures}: MarkerGridProps) {
       contentContainerStyle={styles.listContent}
       data={captures}
       keyExtractor={item => item.id}
-      numColumns={1}
+      numColumns={1} // Single-column vertical list
       renderItem={({item}) => (
         <View style={styles.card}>
+          {/* Render the binary patch as a PNG data-URI */}
           <Image
             source={{uri: `data:image/png;base64,${item.base64}`}}
             style={styles.thumbnail}
@@ -22,7 +35,7 @@ export default function MarkerGrid({captures}: MarkerGridProps) {
           <Text style={styles.label}>{item.label}</Text>
         </View>
       )}
-      scrollEnabled={false}
+      scrollEnabled={false} // Parent ScrollView owns scrolling
     />
   );
 }
@@ -44,7 +57,7 @@ const styles = StyleSheet.create({
   },
   thumbnail: {
     alignSelf: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#ffffff', // White fallback while image loads
     borderRadius: 16,
     width: 300,
     height: 300,
